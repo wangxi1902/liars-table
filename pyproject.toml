@@ -1,0 +1,43 @@
+[project]
+name = "liars-table"
+version = "0.1.0"
+description = "A multi-agent social deduction arena where LLM agents lie, accuse and get caught."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "typer>=0.15",
+    "rich>=13.9",
+]
+
+[project.scripts]
+liars-table = "liars_table.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/liars_table"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# typer.Option in a signature default is the documented Typer pattern.
+extend-immutable-calls = ["typer.Option"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
