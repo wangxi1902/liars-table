@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 
@@ -12,7 +13,7 @@ def run_game(seed: int) -> GameResult:
         agent_factory=lambda seat, role: RandomAgent(random.Random(f"{seed}:{seat}")),
         seed=seed,
     )
-    return engine.run()
+    return asyncio.run(engine.run())
 
 
 def test_every_game_terminates() -> None:
@@ -53,16 +54,19 @@ def test_players_only_act_while_alive() -> None:
         inner = RandomAgent(random.Random(seat))
 
         class Spy:
-            def decide(self, request):
+            async def decide(self, request):
                 alive = holder["engine"].state.is_alive(request.seat)
                 seen.append((request.seat, request.kind, alive))
-                return inner.decide(request)
+                return await inner.decide(request)
+
+            def observe(self, event, round_no: int) -> None:
+                return None
 
         return Spy()
 
     engine = Engine(agent_factory=factory, seed=3)
     holder["engine"] = engine
-    engine.run()
+    asyncio.run(engine.run())
 
     assert seen, "no decisions were recorded"
     for seat, kind, alive in seen:

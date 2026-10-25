@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"
+    # 思考模式默认关闭：思维链会吃掉 max_tokens 导致 JSON 截断，
+    # 而且开启后 temperature 不生效，所有 agent 说话会高度雷同。
+    deepseek_thinking: bool = False
+    deepseek_max_tokens: int = 800
 
     # Embeddings
     embedding_provider: str = "dashscope"

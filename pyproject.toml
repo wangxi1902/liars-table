@@ -5,9 +5,13 @@ description = "A multi-agent social deduction arena where LLM agents lie, accuse
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.115",
+    "openai>=1.60",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "typer>=0.15",
+    "uvicorn>=0.32",
+    "websockets>=13",
     "rich>=13.9",
 ]
 
@@ -16,6 +20,7 @@ liars-table = "liars_table.cli:app"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.27",
     "pytest>=8.3",
     "ruff>=0.8",
 ]

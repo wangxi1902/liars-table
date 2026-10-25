@@ -1,4 +1,8 @@
-"""A baseline agent that only makes legal moves. Used for rule-engine tests."""
+"""A baseline agent that only makes legal moves. Used for rule-engine tests.
+
+注意它的 ``decide`` 也是 ``async def``：接口是异步的，实现就必须异步。
+哪怕它内部一行 await 都没有——因为调用方会 ``await`` 它。
+"""
 
 from __future__ import annotations
 
@@ -18,7 +22,11 @@ class RandomAgent:
     def __init__(self, rng: random.Random | None = None) -> None:
         self.rng = rng or random.Random()
 
-    def decide(self, request: DecisionRequest) -> Decision:
+    def observe(self, event: object, round_no: int) -> None:
+        """随机 agent 不需要记忆：它的决策和历史无关。空实现即可。"""
+        return None
+
+    async def decide(self, request: DecisionRequest) -> Decision:
         if request.kind == "speech":
             alive = [s for s in request.context.get("alive", ()) if s != request.seat]
             if alive:

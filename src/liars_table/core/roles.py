@@ -43,6 +43,14 @@ ROLE_ZH: dict[Role, str] = {
     Role.VILLAGER: "村民",
 }
 
+#: 死因的中文描述。CLI 展示和记忆文本共用一份，避免两处写不一致。
+CAUSE_ZH: dict[str, str] = {
+    "wolf": "被狼人杀害",
+    "poison": "被女巫毒杀",
+    "vote": "被投票放逐",
+    "hunter": "被猎人带走",
+}
+
 #: Standard 9-player board: 3 wolves, 3 specials, 3 villagers.
 TEMPLATE_9: tuple[Role, ...] = (
     Role.WEREWOLF,

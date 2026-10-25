@@ -15,8 +15,9 @@ Python 知识点：
     dataclass(frozen=True, slots=True)
         见 events.py 的说明。这里的 DecisionRequest 用 frozen，
         是为了保证“agent 收到的信息”在决策过程中不会被偷偷改掉。
-    dict[str, Any]
-        类型注解。Any 表示“这里什么都可能放”，是刻意放宽的地方。
+    async def
+        注意 Protocol 里也写了 ``async def``。协议描述的是"形状"，
+        包括异步这个形状；实现方也必须是 async def，否则 await 会报错。
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ..core.claims import Claim
+from ..core.events import Event
 from ..core.roles import Role
 
 
@@ -65,11 +68,19 @@ class Decision:
     target: str | None = None
     save: bool = False
     text: str = ""
-    claims: tuple[str, ...] = ()
+    claims: tuple[Claim, ...] = ()
     cites: tuple[str, ...] = ()
 
 
 class Agent(Protocol):
-    """任何实现了 ``decide`` 的对象都可以当 Agent 用。"""
+    """任何实现了 ``observe`` + 异步 ``decide`` 的对象都可以当 Agent 用。
 
-    def decide(self, request: DecisionRequest) -> Decision: ...
+    为什么要有 ``observe``？
+        记忆不是"决策时临时查一下"，而是"事情发生时当场记下来"。
+        引擎每发一条事件就广播给能看到它的 agent，agent 自己决定记不记。
+        注意：可见性由**引擎**裁决，agent 没有"偷看"的能力。
+    """
+
+    def observe(self, event: Event, round_no: int) -> None: ...
+
+    async def decide(self, request: DecisionRequest) -> Decision: ...

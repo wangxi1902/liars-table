@@ -5,6 +5,10 @@ __pycache__/
 dist/
 build/
 
+node_modules/
+web/dist/
+.venv-web/
+
 .env
 .env.local
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, ClassVar
 
+from .claims import Claim
 from .roles import Camp, Role
 
 
@@ -51,9 +52,14 @@ class Event:
 
 @dataclass(frozen=True, slots=True)
 class PlayerSpec:
-    """开局时每个座位的身份。只在 GameStarted 里出现一次。"""
+    """开局时每个座位的身份与名字。
+
+    名字写进事件而不是只放内存：这样回放、复盘、报告都能还原
+    "P3 当时叫阿飞"这件事——绑定关系是**游戏记录的一部分**，不是临时变量。
+    """
 
     seat: str
+    name: str
     role: Role
 
 
@@ -136,17 +142,18 @@ class PlayerDied(Event):
 class Spoke(Event):
     """一次发言。
 
-    ``claims`` 和 ``cites`` 是为后面的复盘准备的：
+    ``claims`` 和 ``cites`` 是为复盘准备的：
       - claims：这句话里声称了什么（例如“P3 是狼”）
-      - cites ：引用了哪几条事件作为依据（事件没有 id，这里先用轮次+对象描述）
+      - cites ：引用了哪几条事件作为依据。**必须是事件编号**（整数），
+                由引擎校验：编造出来的编号会被直接丢掉。
     有了它们，赛后才能画出“谁在撒谎、哪句话露的馅”。
     """
 
     kind: ClassVar[str] = "spoke"
     player: str
     text: str
-    claims: tuple[str, ...] = ()
-    cites: tuple[str, ...] = ()
+    claims: tuple[Claim, ...] = ()
+    cites: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

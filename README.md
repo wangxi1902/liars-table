@@ -15,20 +15,61 @@
 
 ```bash
 uv sync
+
+# 默认用 mock 模型，不需要 API key
 uv run liars-table demo --seed 7
-```
 
-上帝视角（看到狼人刀口、预言家验人、女巫用药）：
-
-```bash
+# 上帝视角（看到狼人刀口、预言家验人、女巫用药）
 uv run liars-table demo --seed 7 --god
+
+# 真实调用 DeepSeek（先在 .env 里填 DEEPSEEK_API_KEY）
+uv run liars-table demo --seed 7 --live
+
+# 只看规则引擎，用随机走子的假玩家
+uv run liars-table demo --seed 7 --agent random
+
+# 把整局事件流导出，用于回放或分析
+uv run liars-table demo --seed 7 --dump out/game.jsonl
+
+# 生成 Markdown 复盘报告（指控矩阵、谎报身份、无据发言）
+uv run liars-table demo --seed 7 --report out/report.md
+
+# 生成单文件 HTML 回放页（双击打开，不需要服务器）
+uv run liars-table demo --seed 7 --html out/game.html
+
+# 本地实时观战：浏览器打开 http://127.0.0.1:8000
+uv run liars-table serve
+
+# 亲眼看一下异步并发的收益
+uv run liars-table bench --n 9 --latency 0.3
 ```
 
-把整局事件流导出，用于回放或分析：
+### 新版观战界面（React）
+
+用两个终端：先起后端，再起前端（开发服务器会把 `/api` 和 `/ws` 代理到 8000）。
 
 ```bash
-uv run liars-table demo --seed 7 --dump out/game.jsonl
+# 终端 1
+uv run liars-table serve            # 后端 8000
+
+# 终端 2
+cd web
+npm install
+npm run dev                         # 前端 5173，打开 http://127.0.0.1:5173
 ```
+
+界面特性：暗色主题、emoji 头像 + 中文代号、谁发言谁上浮其余变灰、
+打字机逐条播放、出局头像划掉、结束后弹身份表。
+带 `?id=<对局 id>` 可以回放任意一局（`GET /api/games/{id}` 返回的 id）。
+
+两种运行模式：
+
+| 模式 | 命令 | 需要 key | 用途 |
+|---|---|---|---|
+| mock | 默认 | 不需要 | 跑通链路、跑测试、演示并发 |
+| live | `--live` | 需要 | 真实对局，观察模型撒谎 |
+
+`--latency` 控制 mock 模式模拟的网络延迟，用来观察"发言串行、投票并发"的差别。
 
 ## 架构
 
@@ -62,10 +103,18 @@ src/liars_table/
 │   ├── state.py     状态 + fold/replay
 │   └── rules.py     胜负判定、票型统计（纯函数）
 ├── agents/
-│   ├── base.py      Agent 接口：DecideRequest → Decision
+│   ├── base.py      Agent 接口：DecideRequest → Decision（异步）
+│   ├── prompts.py   prompt 拼装
+│   ├── llm_agent.py LLM 玩家：解析 JSON、失败重试、兜底
 │   └── random_agent.py  合法随机走子，用于压测规则
-├── engine.py        回合调度、事件发射、猎人连锁
-└── cli.py           命令行观战台
+├── llm/
+│   ├── client.py    异步客户端：DeepSeek / Mock
+│   └── schema.py    模型输出解析
+├── memory/
+│   ├── models.py    记忆单元：从事件翻译成"玩家视角"
+│   └── store.py     记忆存取 + 检索打分（新近度/重要性/相关性）
+├── engine.py        回合调度、事件发射、并发控制、可见性裁决
+└── cli.py           命令行观战台 + 并发基准
 ```
 
 ## 当前规则（v0.1）
@@ -82,10 +131,13 @@ src/liars_table/
 ## 路线图
 
 - [x] v0.1 规则引擎 + 事件溯源 + 随机 agent 压测
-- [ ] v0.2 LLM agent（结构化输出、发言必须带证据引用）
-- [ ] v0.3 记忆检索（RAG）+ 信念图谱（知识图谱）
-- [ ] v0.4 赛后矛盾检测与复盘报告
-- [ ] v0.5 Web 观战台（流式 + 图谱可视化）
+- [x] v0.2 LLM agent（异步、JSON 结构化输出、失败重试、mock 模式）
+- [x] v0.3a 记忆系统（事件→记忆、打分检索、可见性隔离）
+- [x] v0.3b 事件编号 + 发言证据引用（引擎校验，编造的编号被丢弃）
+- [x] v0.4 结构化断言 + 赛后矛盾检测 + Markdown 复盘报告
+- [x] v0.5a 单文件 HTML 回放页（时间线 / 指控矩阵 / 上帝视角开关）
+- [x] v0.5b 实时观战（FastAPI + WebSocket，服务端内嵌首屏 + 增量推送）
+- [x] v0.5c React 观战界面（暗色、头像上浮、打字机、回放链接）
 - [ ] v0.6 反事实推演、多模型对抗排行榜
 - [ ] v0.7 Docker 部署 + CI
 

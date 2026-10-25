@@ -49,6 +49,7 @@ class GameState:
     round: int = 0
     phase: Phase = Phase.SETUP
     roles: dict[str, Role] = field(default_factory=dict)
+    names: dict[str, str] = field(default_factory=dict)  # 座位 → 名字，来自 GameStarted
     alive: set[str] = field(default_factory=set)
     deaths: list[tuple[str, str]] = field(default_factory=list)
     witch_antidote: bool = True  # 女巫的解药是否还在
@@ -86,6 +87,7 @@ def apply(state: GameState, event: Event) -> GameState:
     if isinstance(event, GameStarted):
         state.seed = event.seed
         state.roles = {p.seat: p.role for p in event.players}
+        state.names = {p.seat: p.name for p in event.players}
         state.alive = set(state.roles)
         state.phase = Phase.SETUP
     elif isinstance(event, NightFell):

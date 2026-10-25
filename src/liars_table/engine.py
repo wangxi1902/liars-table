@@ -14,22 +14,29 @@
 
     模型只能回答“刀谁 / 验谁 / 说什么 / 投谁”，永远碰不到流程本身。
 
-阅读顺序：run() → _night() → _day()，其余都是辅助方法。
+关于异步（v0.2 的重点）：
+    引擎整体是 ``async`` 的，因为每个决策都可能要等一次网络请求。
+    但**不是所有阶段都该并发**，判断标准是"后一个人是否需要听到前一个人说的话"：
+      - 狼人提议：三个狼同时提，互不影响 → ``asyncio.gather`` 并发
+      - 投票：所有人同时投，只基于已有发言 → 并发
+      - 发言：后置位必须听到前置位的话，信息是级联的 → **必须串行**
+    这个区分比"会不会写 async"更重要。乱并发会把游戏逻辑搞坏。
 
 Python 知识点：
+    async def / await
+        调用 async 函数得到协程对象，``await`` 它才会执行。
+    asyncio.gather(*coros)
+        把多个协程一起丢进事件循环，等它们全部完成，返回值**按传入顺序**排列。
+        顺序有保证，所以并发之后事件流依然是确定的、可复现的。
     Callable[[str, Role], Agent]
-        函数类型注解。表示“接收 (座位, 身份) 两个参数、返回 Agent 的可调用对象”。
-        这里用工厂函数而不是直接传 agent 列表，是因为 agent 必须先知道自己的身份
-        才能被创建。
-    list[tuple[str, str]]
-        列表里装元组，例如 ``[("P3", "wolf"), ("P5", "poison")]``。
-    @dataclass
-        GameResult 只是个数据袋子，用 dataclass 比手写 __init__ 清楚。
+        函数类型注解，这里是"agent 工厂"：给座位和身份，造一个 agent。
 """
 
 from __future__ import annotations
 
+import asyncio
 import random
+import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -39,6 +46,8 @@ from .core import events as ev
 from .core.roles import CAMP_OF, TEMPLATE_9, Camp, Phase, Role
 from .core.rules import check_winner, tally, top_voted
 from .core.state import GameState, apply
+from .core.view import LogLine, describe_public
+from .roster import PlayerInfo, build_roster
 
 
 @dataclass
@@ -56,7 +65,7 @@ class Engine:
     典型用法::
 
         engine = Engine(agent_factory=..., seed=7)
-        result = engine.run()
+        result = await engine.run()          # 注意：要 await
 
     注意：Engine 是**有状态**的，一个实例只能跑一局。
     """
@@ -68,6 +77,7 @@ class Engine:
         seed: int = 0,
         max_rounds: int = 20,
         on_event: Callable[[ev.Event], None] | None = None,
+        roster: dict[str, PlayerInfo] | None = None,
     ) -> None:
         self.rng = random.Random(seed)
         self.seed = seed
@@ -81,31 +91,70 @@ class Engine:
         self._factory = agent_factory
         self._max_rounds = max_rounds
         self._on_event = on_event  # 观察者回调，CLI 用它实时打印
+        # 名册：没传就按 seed 生成。传了就沿用调用方那一份，
+        # 保证"界面上叫阿飞的人"和"prompt 里叫阿飞的人"是同一个座位。
+        self.roster = roster or build_roster(seed, len(role_list))
 
         self.state = GameState()
         self.events: list[ev.Event] = []
-        self.transcript: list[str] = []  # 给人类看的战报，和 events 并存
+        self.log: list[LogLine] = []  # 公开时间线，带编号，喂给 agent
         self.notes: dict[str, list[str]] = {}  # 每个座位的私有笔记
         self.agents: dict[str, Agent] = {}
 
     # ---------------------------------------------------------------- 基础设施
 
+    @property
+    def transcript(self) -> list[str]:
+        """人类可读的战报：公开时间线，带事件编号。"""
+        return [f"[{line.seq}] {line.text}" for line in self.log]
+
     def emit(self, event: ev.Event) -> ev.Event:
-        """发出一条事件：存档 → 折叠进状态 → 通知观察者。
+        """发出一条事件：存档 → 折叠进状态 → 写公开时间线 → 通知 → 广播。
 
         所有状态变化都必须经过这里，这是“状态 = fold(事件)”的唯一入口。
+        编号就是它在 events 里的下标，天然稳定，回放时也对得上。
         """
+        seq = len(self.events)
         self.events.append(event)
         apply(self.state, event)
+
+        text = describe_public(event)
+        if text is not None:
+            self.log.append(LogLine(seq=seq, text=text))
+
         if self._on_event is not None:
             self._on_event(event)
+        self._broadcast(event)
         return event
+
+    def _audience(self, event: ev.Event) -> set[str] | None:
+        """这条事件谁能看到？返回 None 表示公开。
+
+        这是防作弊的**第三道闸**：agent 拿到的不是"全部事件"，
+        而是引擎按身份裁剪过的事件流。预言家的验人结果不可能漏给狼人。
+        """
+        if isinstance(event, (ev.WolfChose, ev.WolfKilled)):
+            return set(self.state.seats_with_role(Role.WEREWOLF))
+        if isinstance(event, ev.SeerChecked):
+            return {event.seer}
+        if isinstance(event, ev.WitchActed):
+            return {event.witch}
+        return None
+
+    def _broadcast(self, event: ev.Event) -> None:
+        """把事件推给每一个有权限看到的 agent，让它记进自己的记忆。"""
+        if not self.agents:
+            return
+        audience = self._audience(event)
+        for seat, agent in self.agents.items():
+            if audience is None or seat in audience:
+                agent.observe(event, self.state.round)
 
     def _note(self, seat: str, text: str) -> None:
         """给某个座位记一条私有笔记（例如预言家的验人结果）。"""
         self.notes.setdefault(seat, []).append(text)
 
-    def _ask(
+    async def _ask(
         self,
         seat: str,
         kind: str,
@@ -124,17 +173,19 @@ class Engine:
             round=self.state.round,
             legal=tuple(legal),
             context=dict(context or {}),
-            transcript=tuple(self.transcript[-24:]),  # 只带最近 24 条，控制 prompt 长度
+            transcript=tuple(f"[{line.seq}] {line.text}" for line in self.log[-24:]),
             notes=tuple(self.notes.get(seat, ())[-12:]),
         )
-        decision = self.agents[seat].decide(request)
+        decision = await self.agents[seat].decide(request)
 
-        # 防作弊第二道闸：目标不在合法列表里，直接丢弃，由 _pick 兜底随机
+        # 防作弊第二道闸：目标不在合法列表里，直接丢弃，由调用方兜底
         if decision.target is not None and decision.target not in legal:
             return replace(decision, target=None)
         return decision
 
-    def _pick(self, seat: str, kind: str, legal: Sequence[str], context: dict | None = None) -> str:
+    async def _pick(
+        self, seat: str, kind: str, legal: Sequence[str], context: dict | None = None
+    ) -> str:
         """要一个合法的目标。Agent 给不出来（或给错）就随机兜底。
 
         “永远有合法动作可做”是引擎不崩的底线：
@@ -142,7 +193,7 @@ class Engine:
         """
         if not legal:
             raise RuntimeError(f"no legal target for {kind!r} ({seat})")
-        decision = self._ask(seat, kind, legal, context)
+        decision = await self._ask(seat, kind, legal, context)
         return decision.target if decision.target is not None else self.rng.choice(list(legal))
 
     def _majority(self, votes: dict[str, str], fallback: Sequence[str]) -> str:
@@ -156,20 +207,28 @@ class Engine:
 
     # ---------------------------------------------------------------- 主流程
 
-    def run(self) -> GameResult:
+    async def run(self) -> GameResult:
         """跑完一整局，返回结果。"""
-        # 开局：先把身份固定下来，再据此创建每个 agent
-        specs = tuple(ev.PlayerSpec(f"P{i}", role) for i, role in enumerate(self._roles, start=1))
+        # 开局：先把身份和名字固定下来，再据此创建每个 agent。
+        # 名字进 GameStarted，意味着"P3 叫阿飞"这件事被写进了游戏记录。
+        specs = tuple(
+            ev.PlayerSpec(
+                seat=f"P{i}",
+                name=self.roster[f"P{i}"].name if f"P{i}" in self.roster else f"P{i}",
+                role=role,
+            )
+            for i, role in enumerate(self._roles, start=1)
+        )
         self.emit(ev.GameStarted(seed=self.seed, players=specs))
         for spec in specs:
             self.agents[spec.seat] = self._factory(spec.seat, spec.role)
 
         # 主循环：夜 → 白天，直到分出胜负或超过最大轮数
         while self.state.winner is None and self.state.round < self._max_rounds:
-            night_deaths = self._night()
+            night_deaths = await self._night()
             if self.state.winner is not None:
                 break  # 夜里可能已经结束（例如狼人数量追平好人）
-            self._day(night_deaths)
+            await self._day(night_deaths)
 
         # 保险丝：理论上不应该走到这里，防止死循环
         if self.state.winner is None:
@@ -177,30 +236,39 @@ class Engine:
                 ev.GameEnded(winner=Camp.WOLF, reason=f"超过 {self._max_rounds} 轮，判狼人胜")
             )
         return GameResult(state=self.state, events=self.events, transcript=self.transcript)
-
-    def _night(self) -> list[tuple[str, str]]:
+    async def _night(self) -> list[tuple[str, str]]:
         """一个夜晚。返回 [(出局者, 死因), ...]，供天亮时公布。"""
         self.emit(ev.NightFell(round=self.state.round + 1))
         round_no = self.state.round  # NightFell 已经把 round 推进了
 
-        # ---- 1. 狼人各自的提议，然后多数决 ----
+        # ---- 1. 狼人各自的提议：彼此独立，可以并发 ----
         wolves = self.state.seats_with_role(Role.WEREWOLF)
         # 狼人不能刀自己人，所以候选池排除了所有狼
         prey = [s for s in self.state.alive_sorted() if s not in wolves]
+        decisions = await asyncio.gather(
+            *(
+                self._ask(
+                    wolf,
+                    "kill",
+                    prey,
+                    {"teammates": [s for s in wolves if s != wolf]},
+                )
+                for wolf in wolves
+            )
+        )
         proposals: dict[str, str] = {}
-        for wolf in wolves:
-            teammates = [s for s in wolves if s != wolf]
-            target = self._pick(wolf, "kill", prey, {"teammates": teammates})
+        for wolf, decision in zip(wolves, decisions, strict=True):
+            target = decision.target if decision.target is not None else self.rng.choice(prey)
             proposals[wolf] = target
             self.emit(ev.WolfChose(wolf=wolf, target=target))
         victim = self._majority(proposals, prey)
         self.emit(ev.WolfKilled(target=victim))
 
-        # ---- 2. 预言家验人 ----
-        self._seer_turn(round_no)
+        # ---- 2. 预言家验人（依赖夜晚开始，但不依赖狼刀结果）----
+        await self._seer_turn(round_no)
 
-        # ---- 3. 女巫用药 ----
-        saved, poison = self._witch_turn(victim, round_no)
+        # ---- 3. 女巫用药（必须等狼刀结果出来）----
+        saved, poison = await self._witch_turn(victim, round_no)
 
         # ---- 4. 结算死亡 ----
         deaths: list[tuple[str, str]] = []
@@ -216,14 +284,14 @@ class Engine:
                 killed.append((seat, cause))
 
         # ---- 5. 猎人连锁（夜里死掉也可能开枪）----
-        killed.extend(self._hunter_chain([seat for seat, _ in killed]))
+        killed.extend(await self._hunter_chain([seat for seat, _ in killed]))
 
         winner = check_winner(self.state)
         if winner is not None:
             self._end(winner)
         return killed
 
-    def _seer_turn(self, round_no: int) -> None:
+    async def _seer_turn(self, round_no: int) -> None:
         """预言家验人。注意：预言家是在“死讯结算前”行动的。"""
         seers = self.state.seats_with_role(Role.SEER)
         if not seers:
@@ -232,12 +300,12 @@ class Engine:
         legal = [s for s in self.state.alive_sorted() if s != seer]
         if not legal:
             return
-        target = self._pick(seer, "check", legal)
+        target = await self._pick(seer, "check", legal)
         camp = CAMP_OF[self.state.roles[target]]
         self.emit(ev.SeerChecked(seer=seer, target=target, camp=camp))
         self._note(seer, f"第{round_no}夜查验：{target} 属于 {camp.value} 阵营")
 
-    def _witch_turn(self, victim: str, round_no: int) -> tuple[bool, str | None]:
+    async def _witch_turn(self, victim: str, round_no: int) -> tuple[bool, str | None]:
         """女巫用药。返回 (是否救人, 毒了谁)。
 
         规则：同一夜不能既用解药又用毒药；每种药整局只能用一次。
@@ -252,7 +320,7 @@ class Engine:
             "has_antidote": self.state.witch_antidote,
             "has_poison": self.state.witch_poison,
         }
-        decision = self._ask(witch, "witch", legal, context)
+        decision = await self._ask(witch, "witch", legal, context)
 
         saved = bool(decision.save and self.state.witch_antidote)
         poison = decision.target if self.state.witch_poison else None
@@ -274,7 +342,7 @@ class Engine:
         """让一个人出局。只发事件，不直接改 state——状态由 apply 负责。"""
         self.emit(ev.PlayerDied(player=seat, cause=cause))
 
-    def _hunter_chain(self, dead_seats: list[str]) -> list[tuple[str, str]]:
+    async def _hunter_chain(self, dead_seats: list[str]) -> list[tuple[str, str]]:
         """猎人死亡时开枪，可能再带走一个人。返回被额外带走的人。"""
         extra: list[tuple[str, str]] = []
         for seat in dead_seats:
@@ -285,60 +353,67 @@ class Engine:
                 self.emit(ev.HunterShot(hunter=seat, target=None))
                 continue
             # 注意：此刻猎人已经死了，但这正是规则允许的“临终开枪”
-            target = self._pick(seat, "shoot", legal)
+            target = await self._pick(seat, "shoot", legal)
             self.emit(ev.HunterShot(hunter=seat, target=target))
             if self.state.is_alive(target):
                 self._kill(target, "hunter")
                 extra.append((target, "hunter"))
         return extra
 
-    def _day(self, night_deaths: list[tuple[str, str]]) -> None:
+    async def _day(self, night_deaths: list[tuple[str, str]]) -> None:
         """一个白天：公布死讯 → 依次发言 → 投票放逐。"""
         seats = [seat for seat, _ in night_deaths]
         self.state.phase = Phase.DAWN
         self.emit(ev.DawnBroke(round=self.state.round, deaths=tuple(seats)))
-        if seats:
-            self.transcript.append(f"【第{self.state.round}天】昨晚出局：{'、'.join(seats)}")
-        else:
-            self.transcript.append(f"【第{self.state.round}天】平安夜")
 
-        # ---- 发言：按座位号顺序，每人一次 ----
+        # ---- 发言：按座位号顺序，**串行** ----
+        # 后置位必须听到前置位说了什么，否则"发言"就失去意义了。
         self.state.phase = Phase.DISCUSSION
         for seat in self.state.alive_sorted():
-            decision = self._ask(seat, "speech", (), {"alive": self.state.alive_sorted()})
+            decision = await self._ask(seat, "speech", (), {"alive": self.state.alive_sorted()})
             text = decision.text.strip() or "（沉默）"
-            self.emit(
-                ev.Spoke(player=seat, text=text, claims=decision.claims, cites=decision.cites)
-            )
-            self.transcript.append(f"{seat}：{text}")
+            cites = self._normalize_cites(decision.cites)
+            self.emit(ev.Spoke(player=seat, text=text, claims=decision.claims, cites=cites))
 
-        # ---- 投票：不能投自己；平票则无人出局（简化规则）----
+        # ---- 投票：所有人同时投，可以并发 ----
         self.state.phase = Phase.VOTING
+        voters = self.state.alive_sorted()
+        decisions = await asyncio.gather(
+            *(self._ask(seat, "vote", [s for s in voters if s != seat]) for seat in voters)
+        )
         votes: dict[str, str] = {}
-        for seat in self.state.alive_sorted():
-            legal = [s for s in self.state.alive_sorted() if s != seat]
-            if not legal:
-                break
-            target = self._pick(seat, "vote", legal)
+        for seat, decision in zip(voters, decisions, strict=True):
+            candidates = [s for s in voters if s != seat]
+            target = decision.target if decision.target is not None else self.rng.choice(candidates)
             votes[seat] = target
             self.emit(ev.Voted(voter=seat, target=target))
-            self.transcript.append(f"{seat} 投给 {target}")
 
         exiled = top_voted(votes)
         self.emit(ev.Exiled(player=exiled, tally=tuple(tally(votes))))
-        if exiled is None:
-            self.transcript.append("平票，本轮无人出局")
-        else:
+        if exiled is not None:
             self._kill(exiled, "vote")
-            self.transcript.append(f"{exiled} 被投票出局")
-            self._hunter_chain([exiled])
+            await self._hunter_chain([exiled])
 
         winner = check_winner(self.state)
         if winner is not None:
             self._end(winner)
 
+    def _normalize_cites(self, raw: tuple[str, ...]) -> tuple[int, ...]:
+        """把模型给的引用编号清洗成合法的事件下标。
+
+        模型可能返回 "12"、"[12]"、"第12条"，也可能直接编一个不存在的编号。
+        这里做三件事：抽出数字、丢掉越界的、去重保序。
+        **这是防幻觉的第四道闸**：编造的引用进不了事件流。
+        """
+        cleaned: list[int] = []
+        for item in raw:
+            for token in re.findall(r"\d+", item):
+                index = int(token)
+                if 0 <= index < len(self.events) and index not in cleaned:
+                    cleaned.append(index)
+        return tuple(cleaned)
+
     def _end(self, winner: tuple[Camp, str]) -> None:
         """结束游戏并写明原因。"""
         camp, reason = winner
         self.emit(ev.GameEnded(winner=camp, reason=reason))
-        self.transcript.append(f"【结束】{camp.value} 阵营获胜：{reason}")
