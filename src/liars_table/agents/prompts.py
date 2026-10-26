@@ -72,6 +72,9 @@ KIND_TASK: dict[str, str] = {
     "witch": "现在是夜晚，你看到了今晚被袭击的人。请决定是否使用解药，以及是否使用毒药。",
     "speech": "现在轮到你发言。用 1-2 句话表态：可以指控、辩解或站边，不要复述规则。"
     "如果你确定某人是狼，把它写进 claims；如果你想跳身份，也写进 claims。",
+    "wolf_talk": "现在是狼队夜聊。先回应队友的意见，再说出你的判断："
+    "刀谁收益最大、谁可能已经暴露身份、明天谁最该被推出去。"
+    "然后给出你这一票要刀谁。",
     "vote": "现在是投票阶段，请选择你要放逐的玩家。",
     "shoot": "你已经出局，触发猎人技能，请选择要带走的玩家。",
 }
@@ -80,6 +83,7 @@ KIND_SCHEMA: dict[str, str] = {
     "kill": '{"target": "座位号"}',
     "check": '{"target": "座位号"}',
     "vote": '{"target": "座位号"}',
+    "wolf_talk": '{"text": "你在狼队里说的话", "target": "你建议刀谁"}',
     "shoot": '{"target": "座位号"}',
     "witch": '{"save": true 或 false, "target": "要毒杀的座位号，不用毒药就填 null"}',
     "speech": (
@@ -130,7 +134,16 @@ def build_messages(
     if role is Role.WEREWOLF:
         teammates = request.context.get("teammates") or ()
         if teammates:
-            lines.append(f"你的狼队友：{'、'.join(teammates)}")
+            lines.append(f"你的狼队友：{'、'.join(_label(seat, roster) for seat in teammates)}")
+
+    # 狼队夜聊的记录：后置位要能读到前面队友说了什么，才能反驳/统一
+    wolf_chat = request.context.get("wolf_chat") or []
+    if wolf_chat:
+        lines.append("\n【狼队内部讨论】")
+        lines.extend(
+            f"  第{index + 1}位 {_label(wolf, roster)}：{text}"
+            for index, (wolf, text) in enumerate(wolf_chat)
+        )
 
     if request.kind == "witch":
         victim = request.context.get("victim")

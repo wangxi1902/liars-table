@@ -59,6 +59,9 @@ def _printer(god: bool):
         elif isinstance(event, ev.WolfKilled):
             if god:
                 console.print(f"[red]  狼人决定袭击 {event.target}[/]")
+        elif isinstance(event, ev.WolfTalk):
+            if god:
+                console.print(f"[dim red]  {event.wolf}（狼聊）：{event.text}[/]")
         elif isinstance(event, ev.SeerChecked):
             if god:
                 console.print(

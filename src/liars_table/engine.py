@@ -133,7 +133,7 @@ class Engine:
         这是防作弊的**第三道闸**：agent 拿到的不是"全部事件"，
         而是引擎按身份裁剪过的事件流。预言家的验人结果不可能漏给狼人。
         """
-        if isinstance(event, (ev.WolfChose, ev.WolfKilled)):
+        if isinstance(event, (ev.WolfChose, ev.WolfKilled, ev.WolfTalk)):
             return set(self.state.seats_with_role(Role.WEREWOLF))
         if isinstance(event, ev.SeerChecked):
             return {event.seer}
@@ -241,27 +241,11 @@ class Engine:
         self.emit(ev.NightFell(round=self.state.round + 1))
         round_no = self.state.round  # NightFell 已经把 round 推进了
 
-        # ---- 1. 狼人各自的提议：彼此独立，可以并发 ----
+        # ---- 1. 狼人夜聊：顺序发言，后置位能听到前面的意见 ----
         wolves = self.state.seats_with_role(Role.WEREWOLF)
         # 狼人不能刀自己人，所以候选池排除了所有狼
         prey = [s for s in self.state.alive_sorted() if s not in wolves]
-        decisions = await asyncio.gather(
-            *(
-                self._ask(
-                    wolf,
-                    "kill",
-                    prey,
-                    {"teammates": [s for s in wolves if s != wolf]},
-                )
-                for wolf in wolves
-            )
-        )
-        proposals: dict[str, str] = {}
-        for wolf, decision in zip(wolves, decisions, strict=True):
-            target = decision.target if decision.target is not None else self.rng.choice(prey)
-            proposals[wolf] = target
-            self.emit(ev.WolfChose(wolf=wolf, target=target))
-        victim = self._majority(proposals, prey)
+        victim = await self._wolf_discuss(wolves, prey)
         self.emit(ev.WolfKilled(target=victim))
 
         # ---- 2. 预言家验人（依赖夜晚开始，但不依赖狼刀结果）----
@@ -290,6 +274,35 @@ class Engine:
         if winner is not None:
             self._end(winner)
         return killed
+
+    async def _wolf_discuss(self, wolves: list[str], prey: list[str]) -> str:
+        """狼队夜聊：按座位顺序发言，每人说意见 + 提一个目标，最后多数决。
+
+        为什么串行？因为**后置位要能反驳前置位**：
+        "刀 P5 吧" → "P5 可能是猎人，改刀 P2" → 最终统一。
+        并发提议做不到这种博弈（那个版本三个狼各说各的，谁也听不见谁）。
+        """
+        chat: list[tuple[str, str]] = []
+        proposals: dict[str, str] = {}
+
+        for wolf in wolves:
+            teammates = [seat for seat in wolves if seat != wolf]
+            decision = await self._ask(
+                wolf,
+                "wolf_talk",
+                prey,
+                {"teammates": teammates, "wolf_chat": chat},
+            )
+
+            text = decision.text.strip() or "（没意见）"
+            self.emit(ev.WolfTalk(wolf=wolf, text=text))
+            chat.append((wolf, text))
+
+            target = decision.target if decision.target in prey else self.rng.choice(prey)
+            proposals[wolf] = target
+            self.emit(ev.WolfChose(wolf=wolf, target=target))
+
+        return self._majority(proposals, prey)
 
     async def _seer_turn(self, round_no: int) -> None:
         """预言家验人。注意：预言家是在“死讯结算前”行动的。"""
@@ -360,16 +373,29 @@ class Engine:
                 extra.append((target, "hunter"))
         return extra
 
+    def _speech_order(self) -> list[str]:
+        """每轮随机起手，然后按座位顺序绕一圈。
+
+        为什么要随机？固定从 P1 开始会让"后置位"永远是同样几个人，
+        形成固定的信息优势/劣势。随机起点让每个人都会轮到"最后发言"。
+        用的是 self.rng，所以同一个 seed 仍然可复现。
+        """
+        alive = self.state.alive_sorted()
+        if not alive:
+            return []
+        start = self.rng.randrange(len(alive))
+        return alive[start:] + alive[:start]
+
     async def _day(self, night_deaths: list[tuple[str, str]]) -> None:
         """一个白天：公布死讯 → 依次发言 → 投票放逐。"""
         seats = [seat for seat, _ in night_deaths]
         self.state.phase = Phase.DAWN
         self.emit(ev.DawnBroke(round=self.state.round, deaths=tuple(seats)))
 
-        # ---- 发言：按座位号顺序，**串行** ----
+        # ---- 发言：随机起点、按座位轮转、**串行** ----
         # 后置位必须听到前置位说了什么，否则"发言"就失去意义了。
         self.state.phase = Phase.DISCUSSION
-        for seat in self.state.alive_sorted():
+        for seat in self._speech_order():
             decision = await self._ask(seat, "speech", (), {"alive": self.state.alive_sorted()})
             text = decision.text.strip() or "（沉默）"
             cites = self._normalize_cites(decision.cites)

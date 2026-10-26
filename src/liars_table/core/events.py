@@ -81,6 +81,19 @@ class NightFell(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class WolfTalk(Event):
+    """狼队夜聊的一句话。私有事件：只有狼人能看到。
+
+    和 WolfChose 的区别：Talk 是"说出来的意见"（可以有理由、可以反对队友），
+    Chose 是"最终投给谁"。分开记，复盘时才能看出狼队内部的博弈。
+    """
+
+    kind: ClassVar[str] = "wolf_talk"
+    wolf: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class WolfChose(Event):
     """单个狼人的提议。私有事件：只有狼人能看到。"""
 

@@ -53,6 +53,15 @@ class MemoryItem:
                 (event.wolf, event.target),
             )
 
+        if isinstance(event, ev.WolfTalk):
+            return cls(
+                round_no,
+                "wolf_talk",
+                f"队友 {event.wolf} 说：{event.text}",
+                0.6,
+                (event.wolf,),
+            )
+
         if isinstance(event, ev.WolfKilled):
             return cls(round_no, "wolf_kill", f"狼队决定袭击 {event.target}", 0.85, (event.target,))
 
