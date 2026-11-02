@@ -124,7 +124,7 @@ class Engine:
 
         if self._on_event is not None:
             self._on_event(event)
-        self._broadcast(event)
+        self._broadcast(event, seq)
         return event
 
     def _audience(self, event: ev.Event) -> set[str] | None:
@@ -141,14 +141,14 @@ class Engine:
             return {event.witch}
         return None
 
-    def _broadcast(self, event: ev.Event) -> None:
+    def _broadcast(self, event: ev.Event, event_id: int) -> None:
         """把事件推给每一个有权限看到的 agent，让它记进自己的记忆。"""
         if not self.agents:
             return
         audience = self._audience(event)
         for seat, agent in self.agents.items():
             if audience is None or seat in audience:
-                agent.observe(event, self.state.round)
+                agent.observe(event, self.state.round, event_id)
 
     def _note(self, seat: str, text: str) -> None:
         """给某个座位记一条私有笔记（例如预言家的验人结果）。"""

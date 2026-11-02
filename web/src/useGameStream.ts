@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Entry, FeedEvent, Player, ResultData } from "./types";
+import type {
+  DecisionBasis,
+  Entry,
+  FeedEvent,
+  Player,
+  ResultData,
+  StreamEvent,
+  ThoughtState,
+} from "./types";
 
 type Status = "idle" | "connecting" | "playing" | "done" | "error";
 
@@ -20,12 +28,13 @@ export function useGameStream() {
   const [status, setStatus] = useState<Status>("idle");
   const [seed, setSeed] = useState<number | null>(null);
   const [result, setResult] = useState<ResultData | null>(null);
+  const [thought, setThought] = useState<ThoughtState | null>(null);
 
   const socket = useRef<WebSocket | null>(null);
-  const queue = useRef<FeedEvent[]>([]);
+  const queue = useRef<StreamEvent[]>([]);
   const busy = useRef(false);
   const generation = useRef(0);
-  const lastSeq = useRef(-1);
+  const lastStreamSeq = useRef(-1);
   const finished = useRef(false);
   const drainRef = useRef<() => Promise<void>>(async () => {});
 
@@ -47,8 +56,36 @@ export function useGameStream() {
     const gen = generation.current;
 
     while (queue.current.length > 0 && generation.current === gen) {
-      const event = queue.current.shift();
-      if (!event || !event.text) continue;
+      const item = queue.current.shift();
+      if (!item) continue;
+
+      if ("trace" in item) {
+        const trace = item.trace;
+        if (trace.decision_kind !== "speech") continue;
+        setActive(trace.seat);
+        setThought((current) => ({
+          seat: trace.seat,
+          phase: trace.summary,
+          basis: current && current.seat === trace.seat ? current.basis : null,
+        }));
+        await sleep(trace.status === "started" ? 90 : 35);
+        continue;
+      }
+
+      if ("basis" in item) {
+        if (item.basis.decision_kind !== "speech") continue;
+        setActive(item.basis.seat);
+        setThought({
+          seat: item.basis.seat,
+          phase: "已形成可展示的判断",
+          basis: item.basis,
+        });
+        await sleep(850);
+        continue;
+      }
+
+      const event = item as FeedEvent;
+      if (!event.text) continue;
 
       // 有人出局：让底部头像变灰
       if ((event.kind === "player_died" || event.kind === "exiled") && event.actor) {
@@ -111,9 +148,9 @@ export function useGameStream() {
         return;
       }
 
-      const event = message as unknown as FeedEvent;
-      if (event.seq <= lastSeq.current) return; // 重连去重
-      lastSeq.current = event.seq;
+      const event = message as unknown as StreamEvent;
+      if (event.stream_seq <= lastStreamSeq.current) return; // 重连去重
+      lastStreamSeq.current = event.stream_seq;
       queue.current.push(event);
       void drainRef.current();
     };
@@ -123,12 +160,13 @@ export function useGameStream() {
     generation.current += 1;
     queue.current = [];
     busy.current = false;
-    lastSeq.current = -1;
+    lastStreamSeq.current = -1;
     finished.current = false;
     setEntries([]);
     setActive(null);
     setDead([]);
     setResult(null);
+    setThought(null);
     setStatus("connecting");
 
     try {
@@ -161,6 +199,8 @@ export function useGameStream() {
           players: Player[];
           status: string;
           payloads: FeedEvent[];
+          decision_bases: DecisionBasis[];
+          stream_cursor: number;
           summary: ResultData | null;
         };
 
@@ -187,10 +227,18 @@ export function useGameStream() {
 
         setEntries(list);
         setDead(gone);
-        // 关键：把游标推到已加载的最后一条，否则 WebSocket 补发历史时会重复渲染
-        lastSeq.current = data.payloads.length > 0 ? data.payloads[data.payloads.length - 1].seq : -1;
+        // HTTP快照和WebSocket使用同一流游标，连接后只处理快照之后的新消息。
+        lastStreamSeq.current = data.stream_cursor;
         // 停在最后一个发言者身上：回放页也能看出"谁在说话"
         setActive(lastSpeaker);
+        const lastBasis = [...data.decision_bases]
+          .reverse()
+          .find((basis) => basis.decision_kind === "speech");
+        setThought(
+          lastBasis
+            ? { seat: lastBasis.seat, phase: "最后一次公开判断", basis: lastBasis }
+            : null,
+        );
 
         if (data.summary && data.summary.winner) {
           setResult(data.summary);
@@ -217,5 +265,5 @@ export function useGameStream() {
     return () => socket.current?.close();
   }, [attach, start]);
 
-  return { players, entries, active, dead, status, seed, result, start };
+  return { players, entries, active, thought, dead, status, seed, result, start };
 }

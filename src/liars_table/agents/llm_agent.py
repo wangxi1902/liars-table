@@ -17,7 +17,12 @@ Python 知识点：
 
 from __future__ import annotations
 
-from ..cognition import Facts
+from ..cognition import (
+    ConversationMemory,
+    ConversationMemoryConfig,
+    Facts,
+    SuspicionLedger,
+)
 from ..core.claims import Claim, extract_claims
 from ..core.events import Event
 from ..core.roles import Role
@@ -25,7 +30,14 @@ from ..llm.client import ChatClient
 from ..memory import MemoryItem, MemoryStore
 from ..roster import PlayerInfo, seat_of
 from .base import Decision, DecisionRequest
+from .decision_basis import DecisionBasisSink, build_safe_decision_basis
 from .decision_graph import DecisionWorkflow
+from .decision_runtime import (
+    DecisionBudget,
+    DecisionBudgetPolicy,
+    DecisionRunResult,
+    TraceSink,
+)
 
 
 class LLMAgent:
@@ -42,6 +54,10 @@ class LLMAgent:
         memory_top_k: int = 6,
         temperature: float = 0.8,
         max_retries: int = 1,
+        budget_policy: DecisionBudgetPolicy | None = None,
+        on_trace: TraceSink | None = None,
+        on_decision_basis: DecisionBasisSink | None = None,
+        conversation_config: ConversationMemoryConfig | None = None,
     ) -> None:
         self.seat = seat
         self.role = role
@@ -50,37 +66,76 @@ class LLMAgent:
         self.roster = roster or {}
         # 事实账本：比"最近几条发言"更可靠，模型靠它做全局判断
         self.facts = Facts.from_roster(self.roster) if self.roster else Facts()
+        self.suspicion = (
+            SuspicionLedger.from_roster(seat, self.roster)
+            if self.roster
+            else SuspicionLedger(observer=seat)
+        )
+        self.conversation_memory = (
+            ConversationMemory.from_roster(
+                seat,
+                self.roster,
+                config=conversation_config,
+            )
+            if self.roster
+            else ConversationMemory(
+                observer=seat,
+                config=conversation_config or ConversationMemoryConfig(),
+            )
+        )
         self.memory_top_k = memory_top_k
         self.temperature = temperature
         self.max_retries = max_retries
+        # Policy 负责“这一次该用哪组预算”，Workflow 只负责执行选出的预算。
+        # 旧调用方只传 max_retries 时仍保持原行为，避免一次改动波及所有入口。
+        self.budget_policy = budget_policy or DecisionBudgetPolicy(
+            default=DecisionBudget(max_retries=max_retries)
+        )
+        self.on_decision_basis = on_decision_basis
         # facts 和 memory 是可变对象。工作流拿到的是同一份引用，observe 更新后，
         # 下一次图执行能直接看到最新数据，不需要反复重建整张图。
         self.workflow = DecisionWorkflow(
             client,
             self.memory,
             self.facts,
+            self.suspicion,
+            self.conversation_memory,
             roster=self.roster,
             memory_top_k=memory_top_k,
             temperature=temperature,
             max_retries=max_retries,
+            on_trace=on_trace,
         )
         #: 解析失败次数。不为 0 就说明 prompt 或参数有问题，必须暴露出来。
         self.failures = 0
+        self.timeouts = 0
+        self.last_run: DecisionRunResult | None = None
 
-    def observe(self, event: Event, round_no: int) -> None:
+    def observe(
+        self,
+        event: Event,
+        round_no: int,
+        event_id: int | None = None,
+    ) -> None:
         """引擎广播来的事件：一份进记忆（模糊回忆），一份进事实账本（精确统计）。"""
         item = MemoryItem.from_event(event, self.seat, round_no)
         if item is not None:
             self.memory.add(item)
         self.facts.observe(event)
+        self.suspicion.observe(event, round_no, event_id)
+        self.conversation_memory.observe(event, round_no, event_id)
 
     async def decide(self, request: DecisionRequest) -> Decision:
-        payload = await self.workflow.run(request)
+        budget = self.budget_policy.resolve(request)
+        self.last_run = await self.workflow.run(request, budget)
+        payload = self.last_run.payload
         if payload is None:
             # 两次都解析失败：记一笔账，然后交给引擎随机兜底。
             # 这个计数很关键——上一版真机跑出"（沉默）"时，就是因为它不存在，
             # 谁也没发现是 JSON 被截断了。
             self.failures += 1
+            if self.last_run.timed_out:
+                self.timeouts += 1
             return Decision()
 
         # 模型经常"嘴上说了、字段里没写"：文本里承认"我是预言家"，
@@ -92,8 +147,20 @@ class LLMAgent:
                     claims.append(claim)
         # 最终目标是否合法仍由 Engine._ask 再检查一次。LangGraph 只负责生成和解析，
         # 不拥有游戏规则的最终裁决权。
+        resolved_target = self._resolve(payload.target)
+        safe_basis = build_safe_decision_basis(
+            request,
+            payload,
+            planned_target=resolved_target,
+            resolve_seat=self._resolve,
+            suspicion=self.suspicion,
+            extra_visible_events=self.conversation_memory.evidence_summaries(),
+        )
+        if safe_basis is not None and self.on_decision_basis is not None:
+            self.on_decision_basis(safe_basis)
+
         return Decision(
-            target=self._resolve(payload.target),
+            target=resolved_target,
             save=payload.save,
             text=payload.text,
             claims=self._resolve_claims(claims),

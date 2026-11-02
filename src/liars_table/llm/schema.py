@@ -17,14 +17,51 @@ from __future__ import annotations
 
 import json
 import re
+from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from ..core.claims import Claim
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 _OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+
+
+class EvidenceKind(StrEnum):
+    """模型只能从有限类别中选择依据，不能把自由思维文本直接传给前端。"""
+
+    STATEMENT = "statement"
+    VOTE_PATTERN = "vote_pattern"
+    ROLE_CLAIM = "role_claim"
+    BEHAVIOR = "behavior"
+
+
+class BasisEvidence(BaseModel):
+    """一条候选依据；事件是否真实可见仍要由 Agent 边界二次校验。"""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    event_id: int
+    kind: EvidenceKind = EvidenceKind.BEHAVIOR
+
+
+class PlayerAssessment(BaseModel):
+    """对一个玩家的公开怀疑快照。"""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    seat: str
+    suspicion: int = Field(ge=0, le=100)
+    evidence: tuple[BasisEvidence, ...] = Field(default=(), max_length=3)
+
+
+class DecisionBasisPayload(BaseModel):
+    """模型输出的结构化依据，最多关注三名玩家。"""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    assessments: tuple[PlayerAssessment, ...] = Field(default=(), max_length=3)
 
 
 class ActionPayload(BaseModel):
@@ -37,6 +74,7 @@ class ActionPayload(BaseModel):
     text: str = ""
     claims: tuple[Claim, ...] = ()
     cites: tuple[str, ...] = ()
+    basis: DecisionBasisPayload | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ActionPayload:
@@ -55,6 +93,7 @@ class ActionPayload(BaseModel):
                 "text": text.strip(),
                 "claims": _as_claims(data.get("claims")),
                 "cites": _as_str_tuple(data.get("cites")),
+                "basis": data.get("basis"),
             }
         )
 

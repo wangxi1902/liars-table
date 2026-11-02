@@ -63,11 +63,13 @@ class MockClient:
         self, messages: Sequence[ChatMessage], meta: dict[str, Any]
     ) -> dict[str, Any]:
         if self.rng.random() < 0.12:
-            return {
+            payload = {
                 "text": "我是预言家，昨晚验到了狼，大家跟我走。",
                 "claims": [{"kind": "claim_role", "role": "seer"}],
                 "cites": self._pick_cites(messages),
             }
+            payload["basis"] = self._basis_payload(messages, meta)
+            return payload
 
         current_seat = str(meta.get("seat", ""))
         content = messages[-1].content if messages else ""
@@ -86,12 +88,43 @@ class MockClient:
             "text": self._speech_text(),
             "claims": claims,
             "cites": self._pick_cites(messages),
+            "basis": self._basis_payload(messages, meta, others),
+        }
+
+    def _basis_payload(
+        self,
+        messages: Sequence[ChatMessage],
+        meta: dict[str, Any],
+        candidates: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Mock也生成结构化依据，确保离线演示能走通完整展示链路。"""
+        current_seat = str(meta.get("seat", ""))
+        content = messages[-1].content if messages else ""
+        seats = candidates or sorted(
+            seat for seat in set(re.findall(r"P\d+", content)) if seat != current_seat
+        )
+        if not seats:
+            return {"assessments": []}
+        evidence = [
+            {"event_id": event_id, "kind": "behavior"}
+            for event_id in self._pick_cites(messages)
+        ]
+        return {
+            "assessments": [
+                {
+                    "seat": self.rng.choice(seats),
+                    "suspicion": self.rng.randint(45, 85),
+                    "evidence": evidence,
+                }
+            ]
         }
 
     def _pick_cites(self, messages: Sequence[ChatMessage]) -> list[int]:
         if not messages:
             return []
-        ids = [int(value) for value in re.findall(r"\[(\d+)\]", messages[-1].content)]
+        # 旧时间线使用[12]，个体对话记忆使用#12；Mock同时识别两种稳定编号。
+        matches = re.findall(r"\[(\d+)\]|#(\d+)", messages[-1].content)
+        ids = [int(square or hash_style) for square, hash_style in matches]
         if not ids or self.rng.random() > 0.6:
             return []
         return [self.rng.choice(ids)]

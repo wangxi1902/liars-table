@@ -22,7 +22,12 @@ class RandomAgent:
     def __init__(self, rng: random.Random | None = None) -> None:
         self.rng = rng or random.Random()
 
-    def observe(self, event: object, round_no: int) -> None:
+    def observe(
+        self,
+        event: object,
+        round_no: int,
+        event_id: int | None = None,
+    ) -> None:
         """随机 agent 不需要记忆：它的决策和历史无关。空实现即可。"""
         return None
 

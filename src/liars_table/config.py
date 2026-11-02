@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     deepseek_thinking: bool = False
     deepseek_max_tokens: int = 800
 
+    # Agent 决策预算。环境变量提供默认值，CLI/API 可以按本次对局覆盖。
+    decision_timeout_seconds: float = 5.0
+    decision_max_steps: int = 8
+    decision_max_model_calls: int = 2
+    decision_max_completion_tokens: int = 800
+    decision_max_retries: int = 1
+
     # Embeddings
     embedding_provider: str = "dashscope"
     dashscope_api_key: str = ""

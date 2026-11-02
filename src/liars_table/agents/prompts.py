@@ -20,36 +20,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ..agents.base import DecisionRequest
-from ..cognition import Facts
+from ..cognition import ConversationMemory, Facts, SuspicionLedger
 from ..core.roles import CAMP_OF, ROLE_ZH, Camp, Role
 from ..llm.client import ChatMessage
 from ..memory import MemoryItem
 from ..roster import PlayerInfo, name_of, substitute
+from .role_guidance import render_role_guidance
 
 
 def _label(seat: str, roster: dict[str, PlayerInfo]) -> str:
     """``P3（阿飞）``。同时给座位号和名字，模型两种都能用。"""
     info = roster.get(seat)
     return f"{seat}（{info.name}）" if info else seat
-
-ROLE_BRIEF: dict[Role, str] = {
-    Role.WEREWOLF: "你是狼人。每晚和队友共同决定杀谁。白天必须伪装成好人，误导投票、保护队友。",
-    Role.SEER: (
-        "你是预言家，是好人阵营唯一的信息源。"
-        "第一晚验到狼（查杀）必须立刻跳身份，把查验结果报出来，带领好人投出去；"
-        "验到好人（金水）也要在第二轮之前公开，否则你的信息等于浪费。"
-        "不跳身份的预言家，对好人阵营毫无价值。"
-    ),
-    Role.WITCH: (
-        "你是女巫。有一瓶解药和一瓶毒药，各只能用一次，同一夜不能同时使用。"
-        "你掌握'昨晚谁被刀'这条独家信息，白天要用它来判断谁在说谎。"
-    ),
-    Role.HUNTER: "你是猎人。被狼人杀害或被投票出局时，可以开枪带走一名玩家。",
-    Role.VILLAGER: (
-        "你是普通村民。没有夜间信息，只能靠听发言找狼：重点听谁的逻辑前后矛盾、"
-        "谁在无理由跟票、谁急着替别人下定义。"
-    ),
-}
 
 #: 每个座位固定一种说话风格。
 #: 为什么需要？真实对局里 9 个人说话方式完全不同，但同一套 prompt 会让模型
@@ -103,12 +85,22 @@ SYSTEM_RULES = """这是 9 人标准局狼人杀：3 狼人、1 预言家、1 �
 4. 不要复述别人刚说过的话，也不要使用"平安夜先别急着站边"这类套话；
    每次发言必须给出一个属于你自己的新判断（怀疑谁、为什么、接下来想听谁解释）。"""
 
+BASIS_SCHEMA = (
+    '同时增加 "basis": {"assessments": ['
+    '{"seat": "公开怀疑的座位号", "suspicion": 0到100整数, '
+    '"evidence": [{"event_id": 公开事件编号, "kind": "statement"}]}]}。'
+    "最多关注3人，每人最多3条依据；kind只能是 statement、vote_pattern、"
+    "role_claim、behavior。只能引用上方公开时间线编号，不能写私有身份、夜间信息或思考原文。"
+)
+
 
 def build_messages(
     request: DecisionRequest,
     memories: Sequence[MemoryItem] = (),
     roster: dict[str, PlayerInfo] | None = None,
     facts: Facts | None = None,
+    suspicion: SuspicionLedger | None = None,
+    conversation_memory: ConversationMemory | None = None,
 ) -> list[ChatMessage]:
     """把一次决策请求变成两条消息（system + user）。"""
     role = request.role
@@ -120,7 +112,7 @@ def build_messages(
 
     system = (
         f"你正在参加一局狼人杀。你是 {request.seat}（{me}），身份是{ROLE_ZH[role]}。\n"
-        f"{ROLE_BRIEF[role]}\n"
+        f"{render_role_guidance(role)}\n"
         f"你的目标：{goal}\n"
         f"你的说话风格：{persona}\n\n"
         f"{SYSTEM_RULES}"
@@ -153,39 +145,47 @@ def build_messages(
             f"你还有毒药：{'有' if request.context.get('has_poison') else '没有'}"
         )
 
-    # 结构化态势：存活、票型、身份声称、指控关系。
-    # 比"最近 16 条原文"信息密度高得多，也不会因为截断丢掉关键事实。
+    # 结构化态势负责精确事实；个体对话记忆负责最近原文和旧发言压缩。
     if facts is not None:
         lines.append("")
         lines.append(facts.summary())
-        if request.transcript:
+        if conversation_memory is None and request.transcript:
             lines.append("\n最近几条发言（原文，开头 [数字] 是事件编号）：")
             lines.extend(f"  {substitute(line, roster)}" for line in request.transcript[-6:])
-    elif request.transcript:
-        lines.append("\n最近的公开发言（开头 [数字] 是事件编号，发言时可以引用）：")
-        lines.extend(f"  {substitute(line, roster)}" for line in request.transcript[-16:])
-    else:
-        lines.append("\n目前还没有人发言。")
+    elif conversation_memory is None:
+        if request.transcript:
+            lines.append("\n最近的公开发言（开头 [数字] 是事件编号，发言时可以引用）：")
+            lines.extend(f"  {substitute(line, roster)}" for line in request.transcript[-16:])
+        else:
+            lines.append("\n目前还没有人发言。")
+
+    if conversation_memory is not None:
+        conversation_context = conversation_memory.render_prompt(suspicion)
+        if conversation_context:
+            lines.append("")
+            lines.append(conversation_context)
 
     if request.notes:
-        lines.append("\n只有你知道的信息（**必须用起来**，否则等于没有）：")
+        lines.append("\n只有你知道的信息（是否以及如何使用，由你结合收益和风险决定）：")
         lines.extend(f"  {substitute(line, roster)}" for line in request.notes)
 
-    # 身份专属的行动提示：光有信息不够，得逼模型把它变成动作
-    if role is Role.SEER and request.kind == "speech":
-        lines.append(
-            "\n提示：你还没公开身份的话，现在就应该跳出来报查验结果；"
-            "报的时候要说清楚'我是预言家'，并把查杀对象写进 claims。"
-        )
-    if role is Role.WITCH and request.kind == "speech" and request.notes:
-        lines.append("\n提示：如果昨晚有人被刀而你救了，这条信息可以用来反推谁在说假话。")
-
-    if memories:
+    # ConversationMemory已经负责公开发言，避免同一句话又被MemoryStore重复召回。
+    recalled_memories = [
+        item for item in memories if conversation_memory is None or item.kind != "speech"
+    ]
+    if recalled_memories:
         lines.append("\n你记得的事（按相关度排序，可能不完整）：")
-        lines.extend(f"  - {substitute(item.text, roster)}" for item in memories)
+        lines.extend(f"  - {substitute(item.text, roster)}" for item in recalled_memories)
+
+    visible_seats = tuple(request.context.get("alive") or request.legal)
+    if suspicion is not None and visible_seats and request.kind in {"speech", "vote"}:
+        lines.append("")
+        lines.append(suspicion.summary(visible_seats))
 
     lines.append(f"\n任务：{KIND_TASK[request.kind]}")
     lines.append(f"输出格式：{KIND_SCHEMA[request.kind]}")
+    if request.kind in {"speech", "vote"}:
+        lines.append(BASIS_SCHEMA)
     if request.legal:
         targets = "、".join(_label(seat, roster) for seat in request.legal)
         lines.append(f"合法目标（只能从中选，写座位号或名字都行）：{targets}")

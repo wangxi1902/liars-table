@@ -111,7 +111,7 @@ def test_private_events_never_leak_to_other_players() -> None:
         inner = RandomAgent(random.Random(seat))
 
         class Spy:
-            def observe(self, event, round_no: int) -> None:
+            def observe(self, event, round_no: int, event_id: int | None = None) -> None:
                 seen.setdefault(seat, []).append(event.kind)
 
             async def decide(self, request):

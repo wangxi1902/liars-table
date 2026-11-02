@@ -44,9 +44,38 @@ def test_parse_tolerates_string_claims() -> None:
     assert payload is not None and payload.claims == (Claim("accuse", target="P2"),)
 
 
+def test_parse_structured_decision_basis() -> None:
+    payload = parse_action(
+        '{"target": "P2", "basis": {"assessments": ['
+        '{"seat": "P2", "suspicion": 72, "evidence": '
+        '[{"event_id": 12, "kind": "statement"}]}]}}'
+    )
+
+    assert payload is not None and payload.basis is not None
+    assert payload.basis.assessments[0].suspicion == 72
+    assert payload.basis.assessments[0].evidence[0].event_id == 12
+
+
+def test_parse_rejects_out_of_range_suspicion() -> None:
+    assert (
+        parse_action(
+            '{"basis": {"assessments": [{"seat": "P2", "suspicion": 120}]}}'
+        )
+        is None
+    )
+
+
 def test_parse_rejects_string_boolean() -> None:
     """字符串 ``false`` 在 Python 中是真值，不能因此误触发女巫救人。"""
     assert parse_action('{"save": "false", "target": null}') is None
+
+
+def test_mock_recognises_both_event_number_formats() -> None:
+    client = MockClient(seed=1)
+    messages = [ChatMessage(role="user", content="旧格式[12]，新格式#27")]
+
+    # 固定seed的第一次随机值小于0.6，因此会选择一个真实编号。
+    assert client._pick_cites(messages)[0] in {12, 27}
 
 
 # ------------------------------------------------------------------ LangChain 适配层

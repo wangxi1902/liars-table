@@ -81,6 +81,11 @@ class Agent(Protocol):
         注意：可见性由**引擎**裁决，agent 没有"偷看"的能力。
     """
 
-    def observe(self, event: Event, round_no: int) -> None: ...
+    def observe(
+        self,
+        event: Event,
+        round_no: int,
+        event_id: int | None = None,
+    ) -> None: ...
 
     async def decide(self, request: DecisionRequest) -> Decision: ...

@@ -59,7 +59,7 @@ def test_players_only_act_while_alive() -> None:
                 seen.append((request.seat, request.kind, alive))
                 return await inner.decide(request)
 
-            def observe(self, event, round_no: int) -> None:
+            def observe(self, event, round_no: int, event_id: int | None = None) -> None:
                 return None
 
         return Spy()

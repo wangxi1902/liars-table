@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useGameStream } from "./useGameStream";
-import type { Entry, Player, ResultData } from "./types";
+import type { Entry, Player, ResultData, ThoughtState } from "./types";
 
 function hueStyle(hue: number | undefined): CSSProperties {
   return { "--hue": hue ?? 210 } as CSSProperties;
@@ -23,6 +23,73 @@ function Message({ entry, player }: { entry: Entry; player?: Player }) {
         <div className="who">{player?.name ?? entry.actor}</div>
         <div className="txt">{entry.text}</div>
       </div>
+    </div>
+  );
+}
+
+const evidenceLabels: Record<string, string> = {
+  statement: "发言",
+  vote_pattern: "票型",
+  role_claim: "身份声称",
+  behavior: "行为",
+};
+
+function ThoughtCard({
+  thought,
+  players,
+}: {
+  thought: ThoughtState;
+  players: Record<string, Player>;
+}) {
+  if (!thought.basis) {
+    return (
+      <div className="thought-card thinking">
+        <div className="thought-title">正在思考</div>
+        <div className="thought-phase">{thought.phase}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="thought-card">
+      <div className="thought-title">当前判断</div>
+      {thought.basis.focus_players.map((assessment) => (
+        <div className="assessment" key={assessment.seat}>
+          <div className="assessment-head">
+            <span>关注 {players[assessment.seat]?.name ?? assessment.seat}</span>
+            <strong>
+              狼人嫌疑 {assessment.suspicion}
+              {assessment.recent_delta !== 0 && (
+                <em className={assessment.recent_delta > 0 ? "up" : "down"}>
+                  {assessment.recent_delta > 0 ? "+" : ""}
+                  {assessment.recent_delta}
+                </em>
+              )}
+            </strong>
+          </div>
+          <div className="suspicion-bar">
+            <span style={{ width: `${assessment.suspicion}%` }} />
+          </div>
+          {assessment.evidence.length === 0 ? (
+            <div className="evidence muted">暂时没有足够的公开事件依据</div>
+          ) : (
+            assessment.evidence.map((evidence, index) => (
+              <div className="evidence" key={`${evidence.event_id}-${index}`}>
+                <span>
+                  #{evidence.event_id} · {evidenceLabels[evidence.kind]} · {evidence.reason}
+                  {evidence.delta !== 0 && (
+                    <b className={evidence.delta > 0 ? "up" : "down"}>
+                      {evidence.delta > 0 ? "+" : ""}
+                      {evidence.delta}
+                    </b>
+                  )}
+                </span>
+                {evidence.summary}
+              </div>
+            ))
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -75,7 +142,8 @@ function ResultOverlay({
 }
 
 export default function App() {
-  const { players, entries, active, dead, status, seed, result, start } = useGameStream();
+  const { players, entries, active, thought, dead, status, seed, result, start } =
+    useGameStream();
   const feedRef = useRef<HTMLDivElement>(null);
   const [showResult, setShowResult] = useState(false);
 
@@ -149,6 +217,9 @@ export default function App() {
           if (dead.includes(player.seat)) classes.push("dead");
           return (
             <div key={player.seat} className={classes.join(" ")} style={hueStyle(player.hue)}>
+              {thought?.seat === player.seat && active === player.seat && (
+                <ThoughtCard thought={thought} players={bySeat} />
+              )}
               <div className="face">{player.emoji}</div>
               <div className="nm">{player.name}</div>
             </div>

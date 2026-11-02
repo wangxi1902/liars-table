@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
+from .agents.decision_runtime import DecisionBudget, DecisionBudgetPolicy
 from .agents.llm_agent import LLMAgent
 from .agents.random_agent import RandomAgent
 from .analysis import build_report, render_html, render_markdown
@@ -123,9 +124,53 @@ def demo(
     dump: Path | None = typer.Option(None, "--dump", help="把事件流写成 JSONL"),
     report: Path | None = typer.Option(None, "--report", help="生成 Markdown 复盘报告"),
     html_out: Path | None = typer.Option(None, "--html", help="生成单文件 HTML 回放页"),
+    decision_timeout: float | None = typer.Option(
+        None, "--decision-timeout", help="单次 AI 决策时间上限（秒）"
+    ),
+    decision_max_steps: int | None = typer.Option(
+        None, "--decision-max-steps", help="单次 AI 决策节点步骤上限"
+    ),
+    decision_max_model_calls: int | None = typer.Option(
+        None, "--decision-max-model-calls", help="单次 AI 决策模型调用上限"
+    ),
+    decision_max_tokens: int | None = typer.Option(
+        None, "--decision-max-tokens", help="单次模型回复 token 上限"
+    ),
+    decision_max_retries: int | None = typer.Option(
+        None, "--decision-max-retries", help="模型格式错误后的重试上限"
+    ),
 ) -> None:
     """跑一局。默认用 mock 模型，不需要 API key。"""
     settings = get_settings()
+    # CLI 传值优先；没有传的字段继续使用 .env/Settings 默认值。
+    budget = DecisionBudget(
+        max_seconds=(
+            settings.decision_timeout_seconds
+            if decision_timeout is None
+            else decision_timeout
+        ),
+        max_steps=(
+            settings.decision_max_steps
+            if decision_max_steps is None
+            else decision_max_steps
+        ),
+        max_model_calls=(
+            settings.decision_max_model_calls
+            if decision_max_model_calls is None
+            else decision_max_model_calls
+        ),
+        max_completion_tokens=(
+            settings.decision_max_completion_tokens
+            if decision_max_tokens is None
+            else decision_max_tokens
+        ),
+        max_retries=(
+            settings.decision_max_retries
+            if decision_max_retries is None
+            else decision_max_retries
+        ),
+    )
+    budget_policy = DecisionBudgetPolicy(default=budget)
 
     try:
         client = build_client(
@@ -146,7 +191,13 @@ def demo(
     if agent == "random":
         factory = lambda seat, role: RandomAgent(random.Random(f"{seed}:{seat}"))  # noqa: E731
     else:
-        factory = lambda seat, role: LLMAgent(seat, role, client, roster=roster)  # noqa: E731
+        factory = lambda seat, role: LLMAgent(  # noqa: E731
+            seat,
+            role,
+            client,
+            roster=roster,
+            budget_policy=budget_policy,
+        )
 
     engine = Engine(agent_factory=factory, seed=seed, on_event=_printer(god), roster=roster)
 
@@ -173,6 +224,7 @@ def demo(
     citation_rate = len(cited) / len(speeches) if speeches else 0.0
     silent = sum(1 for e in speeches if e.text == "（沉默）")
     failures = sum(getattr(agent, "failures", 0) for agent in engine.agents.values())
+    timeouts = sum(getattr(agent, "timeouts", 0) for agent in engine.agents.values())
 
     console.print(
         f"[dim]用时 {elapsed:.1f}s · LLM 调用 {calls} 次 · "
@@ -181,7 +233,8 @@ def demo(
     )
     if silent or failures:
         console.print(
-            f"[yellow]警告：{silent} 条沉默发言、{failures} 次解析失败——"
+            f"[yellow]警告：{silent} 条沉默发言、{failures} 次决策失败"
+            f"（其中 {timeouts} 次超时）——"
             f"通常是 max_tokens 不够或模型没按 JSON 输出[/]"
         )
 

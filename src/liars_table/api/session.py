@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..agents.decision_basis import SafeDecisionBasis
+from ..agents.decision_runtime import DecisionBudget, DecisionBudgetPolicy, DecisionTrace
 from ..agents.llm_agent import LLMAgent
 from ..core.events import Event, Exiled, HunterShot, PlayerDied, Spoke, Voted
 from ..core.roles import ROLE_ZH
@@ -44,10 +47,15 @@ class GameSession:
     players: list[dict[str, Any]] = field(default_factory=list)
     roster: dict[str, PlayerInfo] = field(default_factory=dict)
     payloads: list[dict[str, Any]] = field(default_factory=list)
+    stream_payloads: list[dict[str, Any]] = field(default_factory=list)
+    decision_bases: list[dict[str, Any]] = field(default_factory=list)
     result: GameResult | None = None
     task: asyncio.Task | None = None
     subscribers: set[asyncio.Queue] = field(default_factory=set)
     client: MockClient | None = None
+    budget: DecisionBudget = field(default_factory=DecisionBudget)
+    decision_traces: list[dict[str, Any]] = field(default_factory=list)
+    loop: asyncio.AbstractEventLoop | None = field(default=None, repr=False)
 
     # ---------------------------------------------------------------- 广播
 
@@ -72,12 +80,19 @@ class GameSession:
             "actor": actor,
             "text": text,
         }
-        self.payloads.append(payload)
+        published = self._publish(payload)
+        self.payloads.append(published)
+
+    def _publish(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """给所有流消息分配统一游标，保证事件、Trace和依据可以按顺序重放。"""
+        published = {**payload, "stream_seq": len(self.stream_payloads)}
+        self.stream_payloads.append(published)
         for queue in list(self.subscribers):
             try:
-                queue.put_nowait(payload)
+                queue.put_nowait(published)
             except asyncio.QueueFull:  # 慢客户端就丢事件，绝不拖住游戏
                 continue
+        return published
 
     def subscribe(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -86,6 +101,40 @@ class GameSession:
 
     def unsubscribe(self, queue: asyncio.Queue) -> None:
         self.subscribers.discard(queue)
+
+    def push_trace(self, trace: DecisionTrace) -> None:
+        """保存可展示的结构化轨迹；其中不包含 Prompt、原始输出或隐藏思维链。"""
+        self._on_event_loop(self._accept_trace, trace.to_dict())
+
+    def _accept_trace(self, payload: dict[str, Any]) -> None:
+        self.decision_traces.append(payload)
+        # 当前头像上浮对应串行发言。投票是并发的，实时弹多个卡片反而无法阅读。
+        if payload["decision_kind"] == "speech":
+            self._publish({"kind": "decision_trace", "trace": payload})
+
+    def push_decision_basis(self, basis: SafeDecisionBasis) -> None:
+        """保存安全决策依据；发言依据同时进入实时流。"""
+        self._on_event_loop(self._accept_decision_basis, basis.to_dict())
+
+    def _accept_decision_basis(self, payload: dict[str, Any]) -> None:
+        self.decision_bases.append(payload)
+        if payload["decision_kind"] == "speech":
+            self._publish({"kind": "decision_basis", "basis": payload})
+
+    def _on_event_loop(
+        self,
+        callback: Callable[[dict[str, Any]], None],
+        payload: dict[str, Any],
+    ) -> None:
+        """LangGraph同步节点可能在线程中执行，Queue写入必须切回主事件循环。"""
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if self.loop is None or current is self.loop:
+            callback(payload)
+        else:
+            self.loop.call_soon_threadsafe(callback, payload)
 
     # ---------------------------------------------------------------- 结果
 
@@ -122,8 +171,17 @@ class GameManager:
     def get(self, game_id: str) -> GameSession | None:
         return self._sessions.get(game_id)
 
-    async def create(self, seed: int, latency: float = 0.05) -> GameSession:
-        session = GameSession(id=uuid.uuid4().hex[:12], seed=seed)
+    async def create(
+        self,
+        seed: int,
+        latency: float = 0.05,
+        budget: DecisionBudget | None = None,
+    ) -> GameSession:
+        session = GameSession(
+            id=uuid.uuid4().hex[:12],
+            seed=seed,
+            budget=budget or DecisionBudget(),
+        )
         session.roster = build_roster(seed, 9)
         session.players = [info.as_payload() for info in session.roster.values()]
         self._sessions[session.id] = session
@@ -131,11 +189,20 @@ class GameManager:
         return session
 
     async def _run(self, session: GameSession, latency: float) -> None:
+        session.loop = asyncio.get_running_loop()
         client = MockClient(latency=latency, seed=session.seed)
         session.client = client
 
         def factory(seat: str, role):  # noqa: ANN001
-            return LLMAgent(seat, role, client, roster=session.roster)
+            return LLMAgent(
+                seat,
+                role,
+                client,
+                roster=session.roster,
+                budget_policy=DecisionBudgetPolicy(default=session.budget),
+                on_trace=session.push_trace,
+                on_decision_basis=session.push_decision_basis,
+            )
 
         engine = Engine(
             agent_factory=factory,

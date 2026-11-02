@@ -38,7 +38,7 @@ def test_wolves_discuss_in_order_and_see_previous_talks() -> None:
         inner = RandomAgent(random.Random(seat))
 
         class Spy:
-            def observe(self, event, round_no: int) -> None:
+            def observe(self, event, round_no: int, event_id: int | None = None) -> None:
                 return None
 
             async def decide(self, request):
@@ -67,7 +67,7 @@ def test_wolf_talk_events_only_reach_wolves() -> None:
         inner = RandomAgent(random.Random(seat))
 
         class Spy:
-            def observe(self, event, round_no: int) -> None:
+            def observe(self, event, round_no: int, event_id: int | None = None) -> None:
                 if isinstance(event, WolfTalk):
                     seen.setdefault(seat, []).append(event.text)
 

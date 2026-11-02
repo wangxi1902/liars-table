@@ -42,6 +42,9 @@ uv run liars-table serve
 
 # 亲眼看一下异步并发的收益
 uv run liars-table bench --n 9 --latency 0.3
+
+# 临时限制本局每次 AI 决策最多 3 秒、只调用一次模型
+uv run liars-table demo --decision-timeout 3 --decision-max-model-calls 1
 ```
 
 ### 新版观战界面（React）
@@ -58,7 +61,7 @@ npm install
 npm run dev                         # 前端 5173，打开 http://127.0.0.1:5173
 ```
 
-界面特性：暗色主题、emoji 头像 + 中文代号、谁发言谁上浮其余变灰、
+界面特性：暗色主题、emoji 头像 + 中文代号、谁思考谁上浮、结构化判断依据卡片、
 打字机逐条播放、出局头像划掉、结束后弹身份表。
 带 `?id=<对局 id>` 可以回放任意一局（`GET /api/games/{id}` 返回的 id）。
 
@@ -81,9 +84,9 @@ npm run dev                         # 前端 5173，打开 http://127.0.0.1:5173
                 │ DecisionRequest              │ Event
         ┌───────▼────────┐              ┌──────▼───────┐
         │  Agent Runtime │              │  Replay/分析  │
-        │ Perceive       │              │ 复盘·矛盾检测 │
-        │ Recall (记忆)  │              │ 反事实推演    │
-        │ Decide         │              └──────────────┘
+        │ LangGraph      │              │ 复盘·矛盾检测 │
+        │ 上下文→模型→校验│              │ 反事实推演    │
+        │ 动态预算·Trace │              └──────────────┘
         └───────┬────────┘
                 │
         ┌───────▼────────┐
@@ -107,6 +110,7 @@ src/liars_table/
 │   ├── base.py      Agent 接口：DecideRequest → Decision（异步）
 │   ├── prompts.py   prompt 拼装
 │   ├── decision_graph.py  LangGraph 决策节点、条件路由与失败重试
+│   ├── decision_runtime.py 动态预算、选择策略、安全 Trace 与运行结果
 │   ├── llm_agent.py LLM 玩家：运行决策图、转换领域结果
 │   └── random_agent.py  合法随机走子，用于压测规则
 ├── llm/
@@ -145,6 +149,11 @@ src/liars_table/
 - [x] v0.5c React 观战界面（暗色、头像上浮、打字机、回放链接）
 - [x] v0.6a LangChain 模型适配层（标准 ChatModel、Pydantic 输出校验、离线 Fake 测试）
 - [x] v0.6b 最小 LangGraph 决策图（状态、节点、条件边、失败修复循环）
+- [x] v0.6c 动态决策预算（超时/步骤/调用/token）+ 安全结构化 Trace
+- [x] v0.6d 结构化决策依据（怀疑度/公开事件引用）+ WebSocket实时头像卡片
+- [x] v0.6e 跨回合怀疑度账本（确定性更新、变化原因、事件溯源）
+- [x] v0.6f 身份硬规则与可选策略拆分（允许无策略状态）
+- [x] v0.6g 个体化对话记忆（最近原文、旧发言压缩、自我承诺、来源编号）
 - [ ] v0.6 反事实推演、多模型对抗排行榜
 - [ ] v0.7 Docker 部署 + CI
 

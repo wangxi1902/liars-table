@@ -20,11 +20,14 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+from dataclasses import asdict
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Query, WebSocket
 from fastapi.responses import HTMLResponse
 from starlette.websockets import WebSocketDisconnect
 
+from ..agents.decision_runtime import DecisionBudget
+from ..config import get_settings
 from .page import LIVE_PAGE
 from .session import GameManager
 
@@ -55,9 +58,43 @@ async def index(id: str | None = None) -> str:
 
 
 @app.post("/api/games")
-async def create_game(seed: int | None = None, latency: float = 0.05) -> dict:
-    session = await manager.create(seed if seed is not None else random.randrange(10_000), latency)
-    return {"id": session.id, "seed": session.seed, "players": session.players}
+async def create_game(
+    seed: int | None = None,
+    latency: float = 0.05,
+    decision_timeout: float | None = Query(default=None, gt=0),
+    decision_max_steps: int | None = Query(default=None, gt=0),
+    decision_max_model_calls: int | None = Query(default=None, gt=0),
+    decision_max_tokens: int | None = Query(default=None, gt=0),
+    decision_max_retries: int | None = Query(default=None, ge=0),
+) -> dict:
+    """创建后台对局；决策参数只覆盖本局，不会修改全局环境配置。"""
+    settings = get_settings()
+    budget = DecisionBudget(
+        max_seconds=decision_timeout or settings.decision_timeout_seconds,
+        max_steps=decision_max_steps or settings.decision_max_steps,
+        max_model_calls=(
+            decision_max_model_calls or settings.decision_max_model_calls
+        ),
+        max_completion_tokens=(
+            decision_max_tokens or settings.decision_max_completion_tokens
+        ),
+        max_retries=(
+            settings.decision_max_retries
+            if decision_max_retries is None
+            else decision_max_retries
+        ),
+    )
+    session = await manager.create(
+        seed if seed is not None else random.randrange(10_000),
+        latency,
+        budget,
+    )
+    return {
+        "id": session.id,
+        "seed": session.seed,
+        "players": session.players,
+        "decision_budget": asdict(session.budget),
+    }
 
 
 @app.get("/api/games/{game_id}")
@@ -71,6 +108,10 @@ async def get_game(game_id: str) -> dict:
         "status": session.status,
         "players": session.players,
         "payloads": session.payloads,
+        "decision_budget": asdict(session.budget),
+        "decision_traces": session.decision_traces,
+        "decision_bases": session.decision_bases,
+        "stream_cursor": len(session.stream_payloads) - 1,
         "summary": session.summary(),
     }
 
@@ -89,7 +130,7 @@ async def stream(websocket: WebSocket, game_id: str) -> None:
         await websocket.send_json({"kind": "roster", "players": session.players})
 
         # 再补发历史，最后订阅增量——断线重连也能看到完整过程
-        for payload in list(session.payloads):
+        for payload in list(session.stream_payloads):
             await websocket.send_json(payload)
 
         if session.status != "running":
