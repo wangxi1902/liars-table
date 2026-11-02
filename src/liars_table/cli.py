@@ -132,6 +132,7 @@ def demo(
             mock=not live,
             latency=latency,
             api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
             model=settings.deepseek_model,
             thinking=settings.deepseek_thinking,
             max_tokens=settings.deepseek_max_tokens,

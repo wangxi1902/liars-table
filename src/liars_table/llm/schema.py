@@ -5,8 +5,8 @@ LLM 返回的东西永远不可信：可能带 markdown 代码块、可能多说
 让上层决定重试还是兜底。
 
 Python 知识点：
-    dataclass 的 classmethod
-        ``from_dict`` 用 ``@classmethod``，因为它操作的是"类"而不是某个实例。
+    Pydantic BaseModel
+        对模型输出做运行时校验；字段类型不合法时拒绝整次结果，由上层重试。
     isinstance(x, str) / isinstance(x, (int, float))
         运行时类型判断，用于把模型返回的松散结构强制成我们要的类型。
     re.sub
@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
 from typing import Any
+
+from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 
 from ..core.claims import Claim
 
@@ -26,15 +27,16 @@ _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 _OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
-@dataclass(frozen=True, slots=True)
-class ActionPayload:
+class ActionPayload(BaseModel):
     """模型输出解析后的统一结构。字段缺失时用默认值，多余字段忽略。"""
 
+    model_config = ConfigDict(extra="ignore", frozen=True, arbitrary_types_allowed=True)
+
     target: str | None = None
-    save: bool = False
+    save: StrictBool = False
     text: str = ""
-    claims: tuple[Claim, ...] = field(default_factory=tuple)
-    cites: tuple[str, ...] = field(default_factory=tuple)
+    claims: tuple[Claim, ...] = ()
+    cites: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ActionPayload:
@@ -46,12 +48,14 @@ class ActionPayload:
         if not isinstance(text, str):
             text = ""
 
-        return cls(
-            target=target.strip() if target else None,
-            save=bool(data.get("save", False)),
-            text=text.strip(),
-            claims=_as_claims(data.get("claims")),
-            cites=_as_str_tuple(data.get("cites")),
+        return cls.model_validate(
+            {
+                "target": target.strip() if target else None,
+                "save": data.get("save", False),
+                "text": text.strip(),
+                "claims": _as_claims(data.get("claims")),
+                "cites": _as_str_tuple(data.get("cites")),
+            }
         )
 
 
@@ -101,5 +105,5 @@ def parse_action(text: str) -> ActionPayload | None:
         return None
     try:
         return ActionPayload.from_dict(data)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, ValidationError):
         return None

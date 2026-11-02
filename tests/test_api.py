@@ -35,16 +35,19 @@ def test_unknown_game_returns_404() -> None:
 
 
 def test_websocket_streams_events_and_result() -> None:
-    client = TestClient(app)
-    game_id = client.post("/api/games", params={"seed": 5, "latency": 0}).json()["id"]
-
     kinds: list[str] = []
-    with client.websocket_connect(f"/ws/{game_id}") as ws:
-        for _ in range(400):
-            message = ws.receive_json()
-            kinds.append(message["kind"])
-            if message["kind"] == "result":
-                break
+    # 开局接口会用 asyncio.create_task 启动后台游戏。TestClient 不使用上下文时，
+    # 单次 POST 结束就会关闭自己的事件循环，真正会让出控制权的后台任务随之取消。
+    # 把 HTTP 和 WebSocket 放进同一个上下文，等价于 Uvicorn 的长生命周期事件循环。
+    with TestClient(app) as client:
+        game_id = client.post("/api/games", params={"seed": 5, "latency": 0}).json()["id"]
+
+        with client.websocket_connect(f"/ws/{game_id}") as ws:
+            for _ in range(400):
+                message = ws.receive_json()
+                kinds.append(message["kind"])
+                if message["kind"] == "result":
+                    break
 
     assert "game_ended" in kinds, "WebSocket 没有推完一整局"
     assert kinds[-1] == "result", "最后一条应该是终局结果"

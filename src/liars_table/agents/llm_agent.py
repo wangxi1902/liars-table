@@ -1,16 +1,18 @@
-"""LLM Agent：把一次决策变成一次（或两次）模型调用。
+"""LLM Agent：接收游戏请求，并把内部决策交给 LangGraph 工作流。
 
 容错策略（很重要）：
-    模型输出不是 JSON → 把它的错误输出塞回对话，追加一句"只输出 JSON"，重试一次。
+    模型输出不是 JSON → 决策图进入 prepare_retry 节点，补充纠错消息后重试一次。
     仍然失败 → 返回空 Decision，引擎会随机兜底。
     为什么不在 Agent 里随机兜底？因为 Agent 不该知道规则细节，
     "合法目标"的判断权在引擎手里，职责要分清。
 
 Python 知识点：
-    for attempt in range(n + 1)
-        "重试 n 次"的常见写法：总共尝试 n+1 次。
-    try/except 之外的"软失败"
-        解析失败不抛异常，而是返回 None —— 因为这是预期内的常态，不是 bug。
+    依赖注入
+        client、memory 和 roster 都从构造函数传进来，而不是在 Agent 内部写死创建方式。
+        所以测试可以传 Mock，真实运行可以传 LangChain 客户端。
+    委托
+        decide 不再亲自处理每一步，而是把流程委托给 DecisionWorkflow；Agent 只负责
+        把通用的 ActionPayload 转换成狼人杀领域的 Decision。
 """
 
 from __future__ import annotations
@@ -19,16 +21,11 @@ from ..cognition import Facts
 from ..core.claims import Claim, extract_claims
 from ..core.events import Event
 from ..core.roles import Role
-from ..llm.client import ChatClient, ChatMessage
-from ..llm.schema import parse_action
+from ..llm.client import ChatClient
 from ..memory import MemoryItem, MemoryStore
 from ..roster import PlayerInfo, seat_of
 from .base import Decision, DecisionRequest
-from .prompts import build_messages
-
-_RETRY_HINT = (
-    "你上一条输出不是合法 JSON 对象。请只输出一个 JSON 对象，不要任何解释、不要 markdown。"
-)
+from .decision_graph import DecisionWorkflow
 
 
 class LLMAgent:
@@ -56,6 +53,17 @@ class LLMAgent:
         self.memory_top_k = memory_top_k
         self.temperature = temperature
         self.max_retries = max_retries
+        # facts 和 memory 是可变对象。工作流拿到的是同一份引用，observe 更新后，
+        # 下一次图执行能直接看到最新数据，不需要反复重建整张图。
+        self.workflow = DecisionWorkflow(
+            client,
+            self.memory,
+            self.facts,
+            roster=self.roster,
+            memory_top_k=memory_top_k,
+            temperature=temperature,
+            max_retries=max_retries,
+        )
         #: 解析失败次数。不为 0 就说明 prompt 或参数有问题，必须暴露出来。
         self.failures = 0
 
@@ -67,47 +75,30 @@ class LLMAgent:
         self.facts.observe(event)
 
     async def decide(self, request: DecisionRequest) -> Decision:
-        # 用最近的公开发言当查询词：这轮大家在聊谁，就优先回忆关于谁的事
-        query = "\n".join(request.transcript[-4:]) or request.kind
-        memories = self.memory.recall(query, current_round=request.round, k=self.memory_top_k)
-        messages = build_messages(request, memories, self.roster, self.facts)
+        payload = await self.workflow.run(request)
+        if payload is None:
+            # 两次都解析失败：记一笔账，然后交给引擎随机兜底。
+            # 这个计数很关键——上一版真机跑出"（沉默）"时，就是因为它不存在，
+            # 谁也没发现是 JSON 被截断了。
+            self.failures += 1
+            return Decision()
 
-        for attempt in range(self.max_retries + 1):
-            result = await self.client.complete(
-                messages,
-                meta={"kind": request.kind, "legal": list(request.legal), "seat": request.seat},
-                temperature=self.temperature,
-            )
-            payload = parse_action(result.text)
-            if payload is not None:
-                # 模型经常"嘴上说了、字段里没写"：文本里承认"我是预言家"，
-                # claims 里却只写了指控。所以不是"为空才兜底"，而是**每次都合并**。
-                claims = list(payload.claims)
-                if payload.text:
-                    for claim in extract_claims(payload.text):
-                        if claim not in claims:
-                            claims.append(claim)
-                return Decision(
-                    target=self._resolve(payload.target),
-                    save=payload.save,
-                    text=payload.text,
-                    claims=self._resolve_claims(claims),
-                    cites=payload.cites,
-                )
-
-            # 第一次失败：把它自己的错误输出作为 assistant 消息带回，附加纠正提示
-            if attempt < self.max_retries:
-                messages = [
-                    *messages,
-                    ChatMessage(role="assistant", content=result.text[:300]),
-                    ChatMessage(role="user", content=_RETRY_HINT),
-                ]
-
-        # 两次都解析失败：记一笔账，然后交给引擎随机兜底。
-        # 这个计数很关键——上一版真机跑出"（沉默）"时，就是因为它不存在，
-        # 谁也没发现是 JSON 被截断了。
-        self.failures += 1
-        return Decision()
+        # 模型经常"嘴上说了、字段里没写"：文本里承认"我是预言家"，
+        # claims 里却只写了指控。所以不是"为空才兜底"，而是每次都合并。
+        claims = list(payload.claims)
+        if payload.text:
+            for claim in extract_claims(payload.text):
+                if claim not in claims:
+                    claims.append(claim)
+        # 最终目标是否合法仍由 Engine._ask 再检查一次。LangGraph 只负责生成和解析，
+        # 不拥有游戏规则的最终裁决权。
+        return Decision(
+            target=self._resolve(payload.target),
+            save=payload.save,
+            text=payload.text,
+            claims=self._resolve_claims(claims),
+            cites=payload.cites,
+        )
 
     # ---------------------------------------------------------------- 归一化
 

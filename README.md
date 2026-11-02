@@ -87,6 +87,7 @@ npm run dev                         # 前端 5173，打开 http://127.0.0.1:5173
         └───────┬────────┘
                 │
         ┌───────▼────────┐
+        │ LangChain Model│
         │  DeepSeek API  │
         └────────────────┘
 ```
@@ -105,10 +106,14 @@ src/liars_table/
 ├── agents/
 │   ├── base.py      Agent 接口：DecideRequest → Decision（异步）
 │   ├── prompts.py   prompt 拼装
-│   ├── llm_agent.py LLM 玩家：解析 JSON、失败重试、兜底
+│   ├── decision_graph.py  LangGraph 决策节点、条件路由与失败重试
+│   ├── llm_agent.py LLM 玩家：运行决策图、转换领域结果
 │   └── random_agent.py  合法随机走子，用于压测规则
 ├── llm/
-│   ├── client.py    异步客户端：DeepSeek / Mock
+│   ├── base.py      项目内模型协议与消息类型
+│   ├── client.py    客户端工厂与兼容入口
+│   ├── mock.py      离线 Mock 模型
+│   ├── langchain_client.py  LangChain 模型适配器
 │   └── schema.py    模型输出解析
 ├── memory/
 │   ├── models.py    记忆单元：从事件翻译成"玩家视角"
@@ -138,6 +143,8 @@ src/liars_table/
 - [x] v0.5a 单文件 HTML 回放页（时间线 / 指控矩阵 / 上帝视角开关）
 - [x] v0.5b 实时观战（FastAPI + WebSocket，服务端内嵌首屏 + 增量推送）
 - [x] v0.5c React 观战界面（暗色、头像上浮、打字机、回放链接）
+- [x] v0.6a LangChain 模型适配层（标准 ChatModel、Pydantic 输出校验、离线 Fake 测试）
+- [x] v0.6b 最小 LangGraph 决策图（状态、节点、条件边、失败修复循环）
 - [ ] v0.6 反事实推演、多模型对抗排行榜
 - [ ] v0.7 Docker 部署 + CI
 

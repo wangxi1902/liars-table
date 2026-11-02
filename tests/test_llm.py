@@ -1,13 +1,16 @@
 import asyncio
 import json
 
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
+
 from liars_table.agents.base import DecisionRequest
 from liars_table.agents.llm_agent import LLMAgent
 from liars_table.core.claims import Claim
 from liars_table.core.events import GameEnded
 from liars_table.core.roles import Role
 from liars_table.engine import Engine
-from liars_table.llm.client import ChatResult, MockClient
+from liars_table.llm.client import ChatMessage, ChatResult, LangChainChatClient, MockClient
 from liars_table.llm.schema import parse_action
 
 
@@ -39,6 +42,48 @@ def test_parse_garbage_returns_none() -> None:
 def test_parse_tolerates_string_claims() -> None:
     payload = parse_action('{"target": "P2", "claims": "P2是狼"}')
     assert payload is not None and payload.claims == (Claim("accuse", target="P2"),)
+
+
+def test_parse_rejects_string_boolean() -> None:
+    """字符串 ``false`` 在 Python 中是真值，不能因此误触发女巫救人。"""
+    assert parse_action('{"save": "false", "target": null}') is None
+
+
+# ------------------------------------------------------------------ LangChain 适配层
+
+
+def test_langchain_client_adapts_messages_and_usage() -> None:
+    response = AIMessage(
+        content='{"target": "P2"}',
+        usage_metadata={"input_tokens": 12, "output_tokens": 5, "total_tokens": 17},
+    )
+    model = FakeMessagesListChatModel(responses=[response])
+    client = LangChainChatClient(model)
+
+    result = asyncio.run(
+        client.complete(
+            [ChatMessage(role="system", content="只输出 JSON"), ChatMessage("user", "投谁？")],
+            meta={"kind": "vote"},
+        )
+    )
+
+    assert result.text == '{"target": "P2"}'
+    assert result.prompt_tokens == 12
+    assert result.completion_tokens == 5
+    assert client.calls == 1
+    assert client.prompt_tokens == 12
+
+
+def test_langchain_client_rejects_unknown_message_role() -> None:
+    model = FakeMessagesListChatModel(responses=[AIMessage(content="{}")])
+    client = LangChainChatClient(model)
+
+    try:
+        asyncio.run(client.complete([ChatMessage(role="tool", content="非法角色")]))
+    except ValueError as exc:
+        assert "tool" in str(exc)
+    else:
+        raise AssertionError("非法消息角色应该在调用模型前被拒绝")
 
 
 # ------------------------------------------------------------------ Agent 层
